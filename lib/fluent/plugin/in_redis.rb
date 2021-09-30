@@ -1,5 +1,6 @@
 # coding: utf-8
 require 'fluent/input'
+require 'redis'
 
 class Fluent::RedisInInput < Fluent::Input
   Fluent::Plugin.register_input('redis', self)
@@ -29,8 +30,6 @@ class Fluent::RedisInInput < Fluent::Input
 
   def initialize
     super
-
-    require 'redis'
   end
 
   # `configure` is called before `start`.
@@ -44,23 +43,23 @@ class Fluent::RedisInInput < Fluent::Input
     @tag = conf["tag"]
 
     # redis configuration
-    @redis_conf = {}
-    [:url, :timeout, :connect_timeout, :id ].each do |key|
-      @redis_conf[key] = conf[key.to_s]
+    redis_conf = {}
+    ["url", "timeout", "db" ].each do |key|
+      redis_conf[key.to_sym] = conf[key] if conf.has_key?(key)
     end
+
+    @redis = Redis.new(redis_conf)
+    #raise Fluent::ConfigError, "failed to connect to redis source." unless @redis.connected?
   end
 
   # `start` is called when starting and after `configure` is successfully completed.
   def start
     super
 
-    @redis = Redis.new(@redis_conf)
-    #raise Fluent::ConfigError, "failed to connect to redis source." unless @redis.connected?
-
     # Async processor
     @loop = Coolio::Loop.new
 
-    meth  = @tag.nil? ? :handler : :mult_handler
+    meth  = @tag.nil? ? :multi_handler : :handler
     timer = TimerWatcher.new(@int, true, log, &method(meth))
 
     @loop.attach(timer)
@@ -89,13 +88,14 @@ class Fluent::RedisInInput < Fluent::Input
   def handler
     records = @redis.rpop(@key, @max)
 
-    stream = MultiEventStream.new
+    stream = Fluent::MultiEventStream.new
     records.each do |record|
       record.delete("@tag")
       time = record.delete("@time")
 
       stream.add(time, record)
     end
+
     router.emit_stream(@tag, stream)
   end
 
@@ -108,12 +108,11 @@ class Fluent::RedisInInput < Fluent::Input
       tag  = record.delete("@tag")
       time = record.delete("@time")
 
-      streams[tag] = MultiEventStream.new unless streams.has_key?(tag)
-
+      streams[tag] ||= Fluent::MultiEventStream.new
       streams[tag].add(time, record)
     end
 
-    records.each do |tag, stream|
+    streams.each do |tag, stream|
       router.emit_stream(tag, stream)
     end
   end
